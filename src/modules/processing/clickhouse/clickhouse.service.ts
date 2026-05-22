@@ -25,6 +25,26 @@ export class ClickHouseService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `🆔 ClickHouse instance ${this.instanceId} onModuleInit called`,
     );
+
+    // Skip ClickHouse initialization when WRITE_MODE is redis/rabbitmq
+    // or when CLICKHOUSE_ENABLED is explicitly set to false/0.
+    // This allows the service to start without a ClickHouse instance available.
+    const writeMode = this.config.writeMode?.toLowerCase?.() ?? '';
+    const clickhouseEnabled = (process.env.CLICKHOUSE_ENABLED ?? '').toLowerCase();
+
+    const skipClickHouse =
+      writeMode === 'redis' ||
+      writeMode === 'rabbitmq' ||
+      clickhouseEnabled === 'false' ||
+      clickhouseEnabled === '0';
+
+    if (skipClickHouse) {
+      this.logger.log(
+        `ClickHouse initialization skipped (WRITE_MODE=${process.env.WRITE_MODE ?? 'unset'}, CLICKHOUSE_ENABLED=${process.env.CLICKHOUSE_ENABLED ?? 'unset'})`,
+      );
+      return;
+    }
+
     await this.connect();
     await this.initializeDatabase();
   }
