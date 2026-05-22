@@ -113,15 +113,24 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    if (AppFactory.shouldStartTemporalWorker()) {
-      this.logger.log('🚀 Starting Journey Trigger Processor...');
-      await this.initializeKafkaConsumer();
-      await this.startConsuming();
-    } else {
+    if (!AppFactory.shouldStartTemporalWorker()) {
       this.logger.log(
         '⏭️  Journey Trigger Processor disabled (not in TEMPORAL-WORKER mode)',
       );
+      return;
     }
+
+    const queueMode = (process.env.QUEUE_MODE || 'kafka').toLowerCase();
+    if (queueMode !== 'kafka') {
+      this.logger.log(
+        `⏭️  JourneyTriggerProcessor skipped (QUEUE_MODE=${queueMode})`,
+      );
+      return;
+    }
+
+    this.logger.log('🚀 Starting Journey Trigger Processor...');
+    await this.initializeKafkaConsumer();
+    await this.startConsuming();
   }
 
   async onModuleDestroy() {
@@ -290,9 +299,7 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       // 3. Buscar journeys ativas para o account
       const activeJourneys = await this.journeysService.findActive();
 
-      this.logger.log(
-        `🎯 Found ${activeJourneys.length} active journeys `,
-      );
+      this.logger.log(`🎯 Found ${activeJourneys.length} active journeys `);
 
       // 4. Para cada journey, verificar se o evento satisfaz o trigger
       let matchedJourneys = 0;
@@ -428,7 +435,7 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       const allSessions = await this.sessionCacheService.getSessionsByContact(
         event.contactId,
       );
-      
+
       // Filter only WAITING sessions
       const waitingSessions = allSessions.filter(
         (session) => session.status === 'waiting' && session.waitingFor,
@@ -552,21 +559,23 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
 
       // Get the workflow ID - use cached workflowId if provided, otherwise fallback to database lookup
       let workflowId = cachedWorkflowId;
-      
+
       if (workflowId) {
         this.logger.log('🔍 DEBUG: Using workflowId from cache', {
           sessionId,
           workflowId,
         });
       } else {
-        this.logger.log('🔍 DEBUG: No cached workflowId, looking up in database', {
-          sessionId,
-        });
-        
-        const { AppDataSource } = await import('../../../database/ormconfig');
-        const { JourneySession } = await import(
-          '../entities/journey-session.entity'
+        this.logger.log(
+          '🔍 DEBUG: No cached workflowId, looking up in database',
+          {
+            sessionId,
+          },
         );
+
+        const { AppDataSource } = await import('../../../database/ormconfig');
+        const { JourneySession } =
+          await import('../entities/journey-session.entity');
 
         if (!AppDataSource.isInitialized) {
           await AppDataSource.initialize();
@@ -576,15 +585,17 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
         const session = await sessionRepository.findOne({
           where: { id: sessionId },
         });
-        
+
         this.logger.log('🔍 DEBUG: Database session lookup result', {
           sessionId,
           foundSession: !!session,
-          sessionData: session ? {
-            id: session.id,
-            workflowId: session.workflowId,
-            status: session.status,
-          } : null,
+          sessionData: session
+            ? {
+                id: session.id,
+                workflowId: session.workflowId,
+                status: session.status,
+              }
+            : null,
         });
 
         if (!session || !session.workflowId) {
@@ -595,7 +606,7 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
           });
           throw new Error('Session not found or missing workflowId');
         }
-        
+
         workflowId = session.workflowId;
       }
 
@@ -619,9 +630,8 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       });
 
       // Mark wait as completed using activities
-      const { waitActivities } = await import(
-        '../../temporal/activities/wait.activities'
-      );
+      const { waitActivities } =
+        await import('../../temporal/activities/wait.activities');
       await waitActivities.completeWait({ sessionId, nodeId, result });
 
       this.logger.log('Workflow resumed successfully', {
@@ -672,27 +682,32 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       const hasExistingSession = await this.checkForActiveOrWaitingSessions(
         event.contactId,
       );
-      
+
       if (hasExistingSession) {
-        this.logger.warn('⚠️ Blocking journey execution - contact has active or waiting session', {
+        this.logger.warn(
+          '⚠️ Blocking journey execution - contact has active or waiting session',
+          {
+            contactId: event.contactId,
+            journeyId: journey.id,
+            journeyName: journey.name,
+            eventName: event.eventName,
+          },
+        );
+        return;
+      }
+
+      this.logger.log(
+        '✅ Session validation passed - proceeding with journey execution',
+        {
           contactId: event.contactId,
           journeyId: journey.id,
           journeyName: journey.name,
-          eventName: event.eventName,
-        });
-        return;
-      }
-      
-      this.logger.log('✅ Session validation passed - proceeding with journey execution', {
-        contactId: event.contactId,
-        journeyId: journey.id,
-        journeyName: journey.name,
-      });
+        },
+      );
 
       // Import JourneyExecutionWorkflow
-      const { JourneyExecutionWorkflow } = await import(
-        '../../temporal/workflows/journey-execution.workflow'
-      );
+      const { JourneyExecutionWorkflow } =
+        await import('../../temporal/workflows/journey-execution.workflow');
 
       const client = await this.getTemporalClient();
 
@@ -702,7 +717,6 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       // Generate a unique session ID as UUID
       const { randomUUID } = await import('crypto');
       const sessionId = randomUUID();
-
 
       // Prepare workflow arguments matching JourneyExecutionInput interface
       const workflowArgs = {
@@ -728,14 +742,10 @@ export class JourneyTriggerProcessor implements OnModuleInit, OnModuleDestroy {
       });
 
       // Update session with workflow information
-      await this.sessionCacheService.updateSessionStatus(
-        sessionId,
-        'active',
-        {
-          workflowId,
-          workflowRunId: handle.firstExecutionRunId,
-        },
-      );
+      await this.sessionCacheService.updateSessionStatus(sessionId, 'active', {
+        workflowId,
+        workflowRunId: handle.firstExecutionRunId,
+      });
 
       this.logger.log(
         `✅ Journey workflow started successfully: ${workflowId}`,
